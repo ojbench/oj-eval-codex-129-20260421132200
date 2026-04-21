@@ -60,102 +60,134 @@ static bool is_string_literal(const string& t, string& out) {
   return false;
 }
 
+// Read a possibly space-containing quoted string token from stream.
+// Returns true and sets raw (including quotes) if successful.
+static bool read_quoted_token(istream& in, string& raw) {
+  string tok;
+  if (!(in >> tok)) return false;
+  if (tok.empty() || tok.front() != '"') return false;
+  string acc = std::move(tok);
+  while (acc.back() != '"') {
+    string next;
+    if (!(in >> next)) return false;
+    acc.push_back(' ');
+    acc += next;
+  }
+  raw = std::move(acc);
+  return true;
+}
+
+// Helpers for line parsing
+static inline void skip_spaces(const string& s, size_t& p) {
+  while (p < s.size() && isspace((unsigned char)s[p])) ++p;
+}
+static inline bool read_token(const string& s, size_t& p, string& out) {
+  skip_spaces(s, p);
+  if (p >= s.size()) return false;
+  size_t st = p;
+  while (p < s.size() && !isspace((unsigned char)s[p])) ++p;
+  out.assign(s.data()+st, p-st);
+  return true;
+}
+static inline bool read_quoted(const string& s, size_t& p, string& out_raw) {
+  skip_spaces(s, p);
+  if (p >= s.size() || s[p] != '"') return false;
+  size_t start = p;
+  ++p; // skip opening quote
+  // find closing quote
+  size_t q = s.find('"', p);
+  if (q == string::npos) return false;
+  out_raw.assign(s.data()+start, q - start + 1);
+  p = q + 1;
+  return true;
+}
+
 int main() {
   ios::sync_with_stdio(false);
   cin.tie(nullptr);
 
   int n;
   if (!(cin >> n)) return 0;
+  string dummy;
+  getline(cin, dummy); // consume rest of line
+
   vector<Scope> scopes;
   scopes.emplace_back(); // global scope
 
-  string op;
-  string type, name, v1, v2;
-
   auto invalid = [](){ cout << "Invalid operation\n"; };
 
-  for (int line = 0; line < n; ++line) {
-    if (!(cin >> op)) break;
+  string line;
+  for (int li = 0; li < n; ++li) {
+    if (!std::getline(cin, line)) break;
+    size_t p = 0;
+    string op;
+    if (!read_token(line, p, op)) { invalid(); continue; }
 
     if (op == "Indent") {
       scopes.emplace_back();
       continue;
-    }
-    if (op == "Dedent") {
-      if (scopes.size() <= 1) {
-        invalid();
-      } else {
-        scopes.pop_back();
-      }
+    } else if (op == "Dedent") {
+      if (scopes.size() <= 1) { invalid(); } else { scopes.pop_back(); }
       continue;
-    }
-    if (op == "Declare") {
-      if (!(cin >> type >> name)) { invalid(); continue; }
-      string valtok;
-      if (!(cin >> valtok)) { invalid(); continue; }
-
+    } else if (op == "Declare") {
+      string type, name;
+      if (!read_token(line, p, type) || !read_token(line, p, name)) { invalid(); continue; }
       Value val;
       if (type == "int") {
+        string tok;
+        if (!read_token(line, p, tok)) { invalid(); continue; }
         long long x;
-        if (!is_int_literal(valtok, x)) { invalid(); continue; }
+        if (!is_int_literal(tok, x)) { invalid(); continue; }
         val.type = 0; val.i = x;
       } else if (type == "string") {
+        string raw;
+        if (!read_quoted(line, p, raw)) { invalid(); continue; }
         string ss;
-        if (!is_string_literal(valtok, ss)) { invalid(); continue; }
+        if (!is_string_literal(raw, ss)) { invalid(); continue; }
         val.type = 1; val.s = std::move(ss);
-      } else {
-        invalid();
-        continue;
-      }
-
-      // Declare always binds in current scope; shadow allowed
+      } else { invalid(); continue; }
       scopes.back()[name] = std::move(val);
       continue;
-    }
-    if (op == "Add") {
-      if (!(cin >> name >> v1 >> v2)) { invalid(); continue; }
-      auto [pr, ir] = resolve(scopes, name);
-      auto [p1, i1] = resolve(scopes, v1);
-      auto [p2, i2] = resolve(scopes, v2);
+    } else if (op == "Add") {
+      string r, a, b;
+      if (!read_token(line, p, r) || !read_token(line, p, a) || !read_token(line, p, b)) { invalid(); continue; }
+      auto [pr, ir] = resolve(scopes, r);
+      auto [p1, i1] = resolve(scopes, a);
+      auto [p2, i2] = resolve(scopes, b);
       if (!pr || !p1 || !p2) { invalid(); continue; }
       if (pr->type != p1->type || pr->type != p2->type) { invalid(); continue; }
-      if (pr->type == 0) {
-        pr->i = p1->i + p2->i;
+      if (pr->type == 0) pr->i = p1->i + p2->i; else pr->s = p1->s + p2->s;
+      continue;
+    } else if (op == "SelfAdd") {
+      string name;
+      if (!read_token(line, p, name)) { invalid(); continue; }
+      auto [pv, idx] = resolve(scopes, name);
+      if (!pv) { invalid(); continue; }
+      if (pv->type == 0) {
+        string tok;
+        if (!read_token(line, p, tok)) { invalid(); continue; }
+        long long x; if (!is_int_literal(tok, x)) { invalid(); continue; }
+        pv->i += x;
       } else {
-        pr->s = p1->s + p2->s;
+        string raw;
+        if (!read_quoted(line, p, raw)) { invalid(); continue; }
+        string ss; if (!is_string_literal(raw, ss)) { invalid(); continue; }
+        pv->s += ss;
       }
       continue;
-    }
-    if (op == "SelfAdd") {
-      if (!(cin >> name >> v1)) { invalid(); continue; }
-      auto [p, idx] = resolve(scopes, name);
-      if (!p) { invalid(); continue; }
-      if (p->type == 0) {
-        long long x;
-        if (!is_int_literal(v1, x)) { invalid(); continue; }
-        p->i += x;
-      } else {
-        string ss;
-        if (!is_string_literal(v1, ss)) { invalid(); continue; }
-        p->s += ss;
-      }
-      continue;
-    }
-    if (op == "Print") {
-      if (!(cin >> name)) { invalid(); continue; }
-      auto [p, idx] = resolve(scopes, name);
-      if (!p) { invalid(); continue; }
+    } else if (op == "Print") {
+      string name;
+      if (!read_token(line, p, name)) { invalid(); continue; }
+      auto [pv, idx] = resolve(scopes, name);
+      if (!pv) { invalid(); continue; }
       cout << name << ':';
-      if (p->type == 0) cout << p->i;
-      else cout << p->s;
+      if (pv->type == 0) cout << pv->i; else cout << pv->s;
       cout << '\n';
       continue;
+    } else {
+      invalid();
     }
-
-    // Unknown op (should not occur by problem promise)
-    invalid();
   }
 
   return 0;
 }
-
