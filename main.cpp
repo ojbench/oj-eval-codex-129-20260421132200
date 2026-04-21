@@ -26,17 +26,8 @@ struct Value {
   string s;
 };
 
-// Each scope maps name -> Value
-using Scope = unordered_map<string, Value>;
-
-// Find variable by name from inner to outer; return pointer and index of scope
-static pair<Value*, int> resolve(vector<Scope>& scopes, const string& name) {
-  for (int i = (int)scopes.size() - 1; i >= 0; --i) {
-    auto it = scopes[i].find(name);
-    if (it != scopes[i].end()) return { &it->second, i };
-  }
-  return { nullptr, -1 };
-}
+// Variable stacks by name for O(1) current lookup
+using VarStacks = unordered_map<string, vector<Value>>;
 
 // Parsing helpers
 static bool is_int_literal(const string& t, long long& out) {
@@ -111,8 +102,15 @@ int main() {
   string dummy;
   getline(cin, dummy); // consume rest of line
 
-  vector<Scope> scopes;
-  scopes.emplace_back(); // global scope
+  // var stacks per name
+  VarStacks vars;
+  vars.reserve(1 << 15);
+
+  // per-scope declared names (for pop on dedent) and set for duplicate check
+  vector<vector<string>> declared_names;
+  vector<unordered_set<string>> declared_sets;
+  declared_names.emplace_back();
+  declared_sets.emplace_back();
 
   auto invalid = [](){ cout << "Invalid operation\n"; };
 
@@ -124,14 +122,29 @@ int main() {
     if (!read_token(line, p, op)) { invalid(); continue; }
 
     if (op == "Indent") {
-      scopes.emplace_back();
+      declared_names.emplace_back();
+      declared_sets.emplace_back();
       continue;
     } else if (op == "Dedent") {
-      if (scopes.size() <= 1) { invalid(); } else { scopes.pop_back(); }
+      if (declared_names.size() <= 1) { invalid(); }
+      else {
+        // pop all declarations in this scope
+        for (const string& nm : declared_names.back()) {
+          auto it = vars.find(nm);
+          if (it != vars.end()) {
+            if (!it->second.empty()) it->second.pop_back();
+            if (it->second.empty()) vars.erase(it);
+          }
+        }
+        declared_names.pop_back();
+        declared_sets.pop_back();
+      }
       continue;
     } else if (op == "Declare") {
       string type, name;
       if (!read_token(line, p, type) || !read_token(line, p, name)) { invalid(); continue; }
+      // duplicate in same scope is invalid
+      if (declared_sets.back().count(name)) { invalid(); continue; }
       Value val;
       if (type == "int") {
         string tok;
@@ -146,42 +159,48 @@ int main() {
         if (!is_string_literal(raw, ss)) { invalid(); continue; }
         val.type = 1; val.s = std::move(ss);
       } else { invalid(); continue; }
-      scopes.back()[name] = std::move(val);
+      vars[name].push_back(val);
+      declared_sets.back().insert(name);
+      declared_names.back().push_back(name);
       continue;
     } else if (op == "Add") {
       string r, a, b;
       if (!read_token(line, p, r) || !read_token(line, p, a) || !read_token(line, p, b)) { invalid(); continue; }
-      auto [pr, ir] = resolve(scopes, r);
-      auto [p1, i1] = resolve(scopes, a);
-      auto [p2, i2] = resolve(scopes, b);
-      if (!pr || !p1 || !p2) { invalid(); continue; }
-      if (pr->type != p1->type || pr->type != p2->type) { invalid(); continue; }
-      if (pr->type == 0) pr->i = p1->i + p2->i; else pr->s = p1->s + p2->s;
+      auto ir = vars.find(r); auto i1 = vars.find(a); auto i2 = vars.find(b);
+      if (ir==vars.end() || i1==vars.end() || i2==vars.end()) { invalid(); continue; }
+      if (ir->second.empty() || i1->second.empty() || i2->second.empty()) { invalid(); continue; }
+      Value &vr = ir->second.back();
+      Value &v1 = i1->second.back();
+      Value &v2 = i2->second.back();
+      if (vr.type != v1.type || vr.type != v2.type) { invalid(); continue; }
+      if (vr.type == 0) vr.i = v1.i + v2.i; else vr.s = v1.s + v2.s;
       continue;
     } else if (op == "SelfAdd") {
       string name;
       if (!read_token(line, p, name)) { invalid(); continue; }
-      auto [pv, idx] = resolve(scopes, name);
-      if (!pv) { invalid(); continue; }
-      if (pv->type == 0) {
+      auto it = vars.find(name);
+      if (it==vars.end() || it->second.empty()) { invalid(); continue; }
+      Value &pv = it->second.back();
+      if (pv.type == 0) {
         string tok;
         if (!read_token(line, p, tok)) { invalid(); continue; }
         long long x; if (!is_int_literal(tok, x)) { invalid(); continue; }
-        pv->i += x;
+        pv.i += x;
       } else {
         string raw;
         if (!read_quoted(line, p, raw)) { invalid(); continue; }
         string ss; if (!is_string_literal(raw, ss)) { invalid(); continue; }
-        pv->s += ss;
+        pv.s += ss;
       }
       continue;
     } else if (op == "Print") {
       string name;
       if (!read_token(line, p, name)) { invalid(); continue; }
-      auto [pv, idx] = resolve(scopes, name);
-      if (!pv) { invalid(); continue; }
+      auto it = vars.find(name);
+      if (it==vars.end() || it->second.empty()) { invalid(); continue; }
+      Value &pv = it->second.back();
       cout << name << ':';
-      if (pv->type == 0) cout << pv->i; else cout << pv->s;
+      if (pv.type == 0) cout << pv.i; else cout << pv.s;
       cout << '\n';
       continue;
     } else {
